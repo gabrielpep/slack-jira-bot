@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Bot Slack para criar tarefas no Jira automaticamente
-Requer: pip install slack-bolt requests python-dotenv
+Bot Slack para criar tarefas no Jira automaticamente com IA
+Requer: pip install slack-bolt requests python-dotenv flask
 """
 
 import os
@@ -19,6 +19,84 @@ try:
 except:
     pass
 
+class AITaskGenerator:
+    def __init__(self):
+        self.groq_api_key = os.getenv('GROQ_API_KEY')
+        self.api_url = "https://api.groq.com/openai/v1/chat/completions"
+    
+    def generate_tasks_from_prompt(self, user_prompt):
+        """Usa IA para gerar história e subtasks a partir de prompt natural"""
+        
+        system_prompt = """You are an expert agile project manager. Your job is to analyze user requests and break them down into a main story and subtasks.
+
+You must respond ONLY with valid JSON in this exact format:
+{
+  "story": {
+    "title": "Brief title for the main story",
+    "goal": "One sentence summarizing the main deliverable",
+    "description": "Detailed description of what needs to be done",
+    "acceptance_criteria": [
+      "First acceptance criterion",
+      "Second acceptance criterion",
+      "Third acceptance criterion"
+    ]
+  },
+  "subtasks": [
+    {
+      "title": "Subtask title",
+      "goal": "One sentence goal",
+      "description": "Detailed description",
+      "acceptance_criteria": [
+        "Criterion 1",
+        "Criterion 2"
+      ]
+    }
+  ]
+}
+
+Rules:
+- Title: Maximum 100 characters, clear and actionable
+- Goal: One concise sentence (max 150 chars)
+- Description: Detailed explanation (2-4 sentences)
+- Acceptance Criteria: 2-5 bullet points, specific and measurable
+- Subtasks: Create 3-8 subtasks that cover all aspects of the story
+- All text MUST be in English
+- Response MUST be valid JSON only, no markdown or extra text"""
+
+        payload = {
+            "model": "llama-3.1-70b-versatile",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Break down this requirement into a story and subtasks:\n\n{user_prompt}"}
+            ],
+            "temperature": 0.3,
+            "max_tokens": 3000,
+            "response_format": {"type": "json_object"}
+        }
+        
+        headers = {
+            "Authorization": f"Bearer {self.groq_api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        try:
+            response = requests.post(self.api_url, json=payload, headers=headers)
+            response.raise_for_status()
+            result = response.json()
+            
+            content = result['choices'][0]['message']['content']
+            tasks_data = json.loads(content)
+            
+            return {
+                "success": True,
+                "data": tasks_data
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
 class JiraIntegration:
     def __init__(self):
         self.jira_url = os.getenv('JIRA_URL').rstrip('/')
@@ -33,8 +111,115 @@ class JiraIntegration:
         }
     
     def criar_tarefa(self, summary, description="", issue_type="Task", priority="Medium", labels=None):
-        """Cria uma tarefa no Jira"""
+        """Cria uma tarefa no Jira com formatação Markdown para Jira"""
         url = f"{self.jira_url}/rest/api/3/issue"
+        
+        # Converte markdown para formato Jira ADF (Atlassian Document Format)
+        # Processa a descrição para criar estrutura adequada
+        content_blocks = []
+        
+        # Divide a descrição em seções
+        sections = description.split('\n\n')
+        
+        for section in sections:
+            if not section.strip():
+                continue
+                
+            lines = section.split('\n')
+            paragraph_content = []
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Detecta títulos em negrito (*Goal*, *Description*, etc)
+                if line.startswith('*') and line.endswith('*') and len(line) > 2:
+                    # Adiciona parágrafo anterior se existir
+                    if paragraph_content:
+                        content_blocks.append({
+                            "type": "paragraph",
+                            "content": paragraph_content
+                        })
+                        paragraph_content = []
+                    
+                    # Adiciona título
+                    content_blocks.append({
+                        "type": "heading",
+                        "attrs": {"level": 3},
+                        "content": [{
+                            "type": "text",
+                            "text": line.strip('*')
+                        }]
+                    })
+                # Detecta bullets (linhas que começam com •)
+                elif line.startswith('•'):
+                    # Adiciona parágrafo anterior se existir
+                    if paragraph_content:
+                        content_blocks.append({
+                            "type": "paragraph",
+                            "content": paragraph_content
+                        })
+                        paragraph_content = []
+                    
+                    # Adiciona item de lista
+                    if not content_blocks or content_blocks[-1].get("type") != "bulletList":
+                        content_blocks.append({
+                            "type": "bulletList",
+                            "content": []
+                        })
+                    
+                    content_blocks[-1]["content"].append({
+                        "type": "listItem",
+                        "content": [{
+                            "type": "paragraph",
+                            "content": [{
+                                "type": "text",
+                                "text": line.lstrip('•').strip()
+                            }]
+                        }]
+                    })
+                # Detecta linha separadora (---)
+                elif line.startswith('---'):
+                    if paragraph_content:
+                        content_blocks.append({
+                            "type": "paragraph",
+                            "content": paragraph_content
+                        })
+                        paragraph_content = []
+                    content_blocks.append({"type": "rule"})
+                # Detecta itálico (_texto_)
+                elif line.startswith('_') and line.endswith('_'):
+                    paragraph_content.append({
+                        "type": "text",
+                        "text": line.strip('_'),
+                        "marks": [{"type": "em"}]
+                    })
+                # Texto normal
+                else:
+                    if paragraph_content:
+                        paragraph_content.append({"type": "text", "text": "\n"})
+                    paragraph_content.append({
+                        "type": "text",
+                        "text": line
+                    })
+            
+            # Adiciona último parágrafo da seção
+            if paragraph_content:
+                content_blocks.append({
+                    "type": "paragraph",
+                    "content": paragraph_content
+                })
+        
+        # Se não houver blocos, cria um parágrafo simples
+        if not content_blocks:
+            content_blocks = [{
+                "type": "paragraph",
+                "content": [{
+                    "type": "text",
+                    "text": description if description else "No description provided"
+                }]
+            }]
         
         payload = {
             "fields": {
@@ -43,13 +228,7 @@ class JiraIntegration:
                 "description": {
                     "type": "doc",
                     "version": 1,
-                    "content": [{
-                        "type": "paragraph",
-                        "content": [{
-                            "type": "text",
-                            "text": description
-                        }]
-                    }]
+                    "content": content_blocks
                 },
                 "issuetype": {"name": issue_type},
                 "priority": {"name": priority}
@@ -125,9 +304,20 @@ def open_modal(ack, body, client):
                     "element": {
                         "type": "plain_text_input",
                         "action_id": "titulo_input",
-                        "placeholder": {"type": "plain_text", "text": "Ex: Implement authentication"}
+                        "placeholder": {"type": "plain_text", "text": "Ex: Implement user authentication"}
                     },
                     "label": {"type": "plain_text", "text": "Title *"}
+                },
+                {
+                    "type": "input",
+                    "block_id": "goal",
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "goal_input",
+                        "placeholder": {"type": "plain_text", "text": "Ex: Enable secure user login with OAuth2"}
+                    },
+                    "label": {"type": "plain_text", "text": "Goal *"},
+                    "hint": {"type": "plain_text", "text": "Short objective phrase summarizing the deliverable"}
                 },
                 {
                     "type": "input",
@@ -136,10 +326,22 @@ def open_modal(ack, body, client):
                         "type": "plain_text_input",
                         "action_id": "descricao_input",
                         "multiline": True,
-                        "placeholder": {"type": "plain_text", "text": "Describe the task details..."}
+                        "placeholder": {"type": "plain_text", "text": "Detailed description of what needs to be done..."}
                     },
-                    "label": {"type": "plain_text", "text": "Description"},
-                    "optional": True
+                    "label": {"type": "plain_text", "text": "Description *"},
+                    "hint": {"type": "plain_text", "text": "Detailed explanation of the task"}
+                },
+                {
+                    "type": "input",
+                    "block_id": "acceptance_criteria",
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "acceptance_input",
+                        "multiline": True,
+                        "placeholder": {"type": "plain_text", "text": "User can login with email and password\nSession persists for 24 hours\nInvalid credentials show error message"}
+                    },
+                    "label": {"type": "plain_text", "text": "Acceptance Criteria *"},
+                    "hint": {"type": "plain_text", "text": "One criterion per line (will be converted to bullets)"}
                 },
                 {
                     "type": "input",
@@ -196,7 +398,9 @@ def handle_submission(ack, body, client, view):
     values = view["state"]["values"]
     
     titulo = values["titulo"]["titulo_input"]["value"]
-    descricao = values["descricao"]["descricao_input"].get("value", "")
+    goal = values["goal"]["goal_input"]["value"]
+    descricao = values["descricao"]["descricao_input"]["value"]
+    acceptance_criteria = values["acceptance_criteria"]["acceptance_input"]["value"]
     tipo = values["tipo"]["tipo_select"]["selected_option"]["value"]
     prioridade = values["prioridade"]["prioridade_select"]["selected_option"]["value"]
     labels_text = values["labels"]["labels_input"].get("value", "")
@@ -204,16 +408,29 @@ def handle_submission(ack, body, client, view):
     # Processa labels
     labels = [l.strip() for l in labels_text.split(",") if l.strip()] if labels_text else None
     
-    # Adiciona informação do criador
-    user_id = body["user"]["id"]
-    descricao_completa = f"{descricao}\n\n---\nCriado via Slack por <@{user_id}>"
+    # Formata os critérios de aceite em bullets
+    criteria_lines = [line.strip() for line in acceptance_criteria.split("\n") if line.strip()]
+    criteria_bullets = "\n".join([f"• {line}" for line in criteria_lines])
+    
+    # Monta a descrição no formato refinado
+    descricao_refinada = f"""*Goal*
+{goal}
+
+*Description*
+{descricao}
+
+*Acceptance Criteria*
+{criteria_bullets}
+
+---
+_Created via Slack by <@{body["user"]["id"]}>_"""
     
     ack()
     
     # Cria a tarefa
     result = jira.criar_tarefa(
         summary=titulo,
-        description=descricao_completa,
+        description=descricao_refinada,
         issue_type=tipo,
         priority=prioridade,
         labels=labels
@@ -223,16 +440,16 @@ def handle_submission(ack, body, client, view):
     if result['success']:
         client.chat_postMessage(
             channel=body["user"]["id"],
-            text=f"✅ *Tarefa criada com sucesso!*\n\n"
-                 f"*Chave:* {result['key']}\n"
-                 f"*Tipo:* {tipo}\n"
-                 f"*Prioridade:* {prioridade}\n"
+            text=f"✅ *Task created successfully!*\n\n"
+                 f"*Key:* {result['key']}\n"
+                 f"*Type:* {tipo}\n"
+                 f"*Priority:* {prioridade}\n"
                  f"*Link:* {result['url']}"
         )
     else:
         client.chat_postMessage(
             channel=body["user"]["id"],
-            text=f"❌ *Erro ao criar tarefa*\n{result['error']}"
+            text=f"❌ *Error creating task*\n{result['error']}"
         )
 
 # Menções no canal (@bot criar tarefa...)
