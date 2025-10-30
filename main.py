@@ -64,7 +64,7 @@ Rules:
 - Response MUST be valid JSON only, no markdown or extra text"""
 
         payload = {
-            "model": "llama-3.1-70b-versatile",
+            "model": "llama-3.3-70b-versatile",
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Break down this requirement into a story and subtasks:\n\n{user_prompt}"}
