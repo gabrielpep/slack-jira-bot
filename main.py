@@ -253,6 +253,29 @@ def handle_mention(event, say):
         say("Use `/nova-tarefa` para criar uma tarefa no Jira! 🎯")
 
 if __name__ == "__main__":
+    # Cria servidor HTTP simples para o Render detectar
+    from flask import Flask
+    from threading import Thread
+    
+    web_app = Flask(__name__)
+    
+    @web_app.route('/')
+    def home():
+        return "🤖 Bot Slack está rodando!"
+    
+    @web_app.route('/health')
+    def health():
+        return {"status": "ok"}
+    
+    def run_flask():
+        port = int(os.getenv('PORT', 10000))
+        web_app.run(host='0.0.0.0', port=port)
+    
+    # Inicia Flask em thread separada
+    flask_thread = Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    
     # Inicia o bot em modo Socket
     handler = SocketModeHandler(app, os.getenv("SLACK_APP_TOKEN"))
     print("⚡ Bot Slack está rodando!")
