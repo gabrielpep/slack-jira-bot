@@ -401,6 +401,8 @@ def handle_create_task_command(ack, command, respond, client):
     
     created_subtasks = []
     for idx, subtask in enumerate(subtasks_data, 1):
+        print(f"[DEBUG] Creating subtask {idx}/{len(subtasks_data)}: {subtask.get('title', 'No title')}")
+        
         subtask_description = format_description(
             subtask.get('goal', ''),
             subtask.get('description', ''),
@@ -416,8 +418,13 @@ def handle_create_task_command(ack, command, respond, client):
             priority="Medium"
         )
         
+        print(f"[DEBUG] Subtask {idx} result: {subtask_result}")
+        
         if subtask_result['success']:
             created_subtasks.append(f"  • {subtask_result['key']}: {subtask.get('title', '')}")
+        else:
+            print(f"[ERROR] Failed to create subtask {idx}: {subtask_result.get('error', 'Unknown error')}")
+            print(f"[ERROR] Details: {subtask_result.get('details', 'No details')[:500]}")
     
     # Mensagem final com resumo
     subtasks_list = "\n".join(created_subtasks) if created_subtasks else "  (none created)"
