@@ -80,35 +80,35 @@ class JiraIntegration:
 app = App(token=os.getenv("SLACK_BOT_TOKEN"))
 jira = JiraIntegration()
 
-# Comando slash: /criar-tarefa
-@app.command("/criar-tarefa")
-def handle_criar_tarefa_command(ack, command, respond):
-    """Comando para criar tarefa de forma rápida"""
+# Comando slash: /create-task
+@app.command("/create-task")
+def handle_create_task_command(ack, command, respond):
+    """Command to create task quickly"""
     ack()
     
     text = command['text'].strip()
     if not text:
-        respond("❌ Por favor, informe o título da tarefa.\nExemplo: `/criar-tarefa Corrigir bug no login`")
+        respond("❌ Please provide the task title.\nExample: `/create-task Fix login bug`")
         return
     
-    respond("⏳ Criando tarefa no Jira...")
+    respond("⏳ Creating task in Jira...")
     
     result = jira.criar_tarefa(
         summary=text,
-        description=f"Tarefa criada via Slack por <@{command['user_id']}>",
+        description=f"Task created via Slack by <@{command['user_id']}>",
         issue_type="Task",
         priority="Medium"
     )
     
     if result['success']:
-        respond(f"✅ Tarefa criada com sucesso!\n🔗 *{result['key']}*: {result['url']}")
+        respond(f"✅ Task created successfully!\n🔗 *{result['key']}*: {result['url']}")
     else:
-        respond(f"❌ Erro ao criar tarefa: {result['error']}")
+        respond(f"❌ Error creating task: {result['error']}")
 
-# Modal interativo para criar tarefa com mais detalhes
-@app.command("/nova-tarefa")
+# Interactive modal to create task with more details
+@app.command("/new-task")
 def open_modal(ack, body, client):
-    """Abre modal com formulário completo"""
+    """Opens modal with complete form"""
     ack()
     
     client.views_open(
@@ -116,8 +116,8 @@ def open_modal(ack, body, client):
         view={
             "type": "modal",
             "callback_id": "tarefa_modal",
-            "title": {"type": "plain_text", "text": "Nova Tarefa Jira"},
-            "submit": {"type": "plain_text", "text": "Criar Tarefa"},
+            "title": {"type": "plain_text", "text": "New Jira Task"},
+            "submit": {"type": "plain_text", "text": "Create Task"},
             "blocks": [
                 {
                     "type": "input",
@@ -125,9 +125,9 @@ def open_modal(ack, body, client):
                     "element": {
                         "type": "plain_text_input",
                         "action_id": "titulo_input",
-                        "placeholder": {"type": "plain_text", "text": "Ex: Implementar autenticação"}
+                        "placeholder": {"type": "plain_text", "text": "Ex: Implement authentication"}
                     },
-                    "label": {"type": "plain_text", "text": "Título *"}
+                    "label": {"type": "plain_text", "text": "Title *"}
                 },
                 {
                     "type": "input",
@@ -136,9 +136,9 @@ def open_modal(ack, body, client):
                         "type": "plain_text_input",
                         "action_id": "descricao_input",
                         "multiline": True,
-                        "placeholder": {"type": "plain_text", "text": "Descreva os detalhes da tarefa..."}
+                        "placeholder": {"type": "plain_text", "text": "Describe the task details..."}
                     },
-                    "label": {"type": "plain_text", "text": "Descrição"},
+                    "label": {"type": "plain_text", "text": "Description"},
                     "optional": True
                 },
                 {
@@ -147,7 +147,7 @@ def open_modal(ack, body, client):
                     "element": {
                         "type": "static_select",
                         "action_id": "tipo_select",
-                        "placeholder": {"type": "plain_text", "text": "Selecione o tipo"},
+                        "placeholder": {"type": "plain_text", "text": "Select type"},
                         "options": [
                             {"text": {"type": "plain_text", "text": "Task"}, "value": "Task"},
                             {"text": {"type": "plain_text", "text": "Bug"}, "value": "Bug"},
@@ -155,7 +155,7 @@ def open_modal(ack, body, client):
                         ],
                         "initial_option": {"text": {"type": "plain_text", "text": "Task"}, "value": "Task"}
                     },
-                    "label": {"type": "plain_text", "text": "Tipo"}
+                    "label": {"type": "plain_text", "text": "Type"}
                 },
                 {
                     "type": "input",
@@ -163,7 +163,7 @@ def open_modal(ack, body, client):
                     "element": {
                         "type": "static_select",
                         "action_id": "prioridade_select",
-                        "placeholder": {"type": "plain_text", "text": "Selecione a prioridade"},
+                        "placeholder": {"type": "plain_text", "text": "Select priority"},
                         "options": [
                             {"text": {"type": "plain_text", "text": "🔴 Highest"}, "value": "Highest"},
                             {"text": {"type": "plain_text", "text": "🟠 High"}, "value": "High"},
@@ -173,7 +173,7 @@ def open_modal(ack, body, client):
                         ],
                         "initial_option": {"text": {"type": "plain_text", "text": "🟡 Medium"}, "value": "Medium"}
                     },
-                    "label": {"type": "plain_text", "text": "Prioridade"}
+                    "label": {"type": "plain_text", "text": "Priority"}
                 },
                 {
                     "type": "input",
@@ -181,9 +181,9 @@ def open_modal(ack, body, client):
                     "element": {
                         "type": "plain_text_input",
                         "action_id": "labels_input",
-                        "placeholder": {"type": "plain_text", "text": "Ex: backend, urgente, api"}
+                        "placeholder": {"type": "plain_text", "text": "Ex: backend, urgent, api"}
                     },
-                    "label": {"type": "plain_text", "text": "Labels (separadas por vírgula)"},
+                    "label": {"type": "plain_text", "text": "Labels (comma separated)"},
                     "optional": True
                 }
             ]
