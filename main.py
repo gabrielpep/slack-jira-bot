@@ -179,7 +179,7 @@ class JiraIntegration:
                 "details": response.text if 'response' in locals() else ""
             }
     
-    def criar_subtask(self, parent_key, summary, description="", priority="Medium"):
+    def criar_subtask(self, parent_key, summary, description=""):
         """Cria uma subtask linkada a uma história"""
         url = f"{self.jira_url}/rest/api/3/issue"
         
@@ -196,8 +196,7 @@ class JiraIntegration:
                     "version": 1,
                     "content": content_blocks
                 },
-                "issuetype": {"name": "Subtask"},
-                "priority": {"name": priority}
+                "issuetype": {"name": "Subtask"}
             }
         }
         
@@ -414,8 +413,7 @@ def handle_create_task_command(ack, command, respond, client):
         subtask_result = jira.criar_subtask(
             parent_key=story_key,
             summary=subtask.get('title', f'Subtask {idx}'),
-            description=subtask_description,
-            priority="Medium"
+            description=subtask_description
         )
         
         print(f"[DEBUG] Subtask {idx} result: {subtask_result}")
