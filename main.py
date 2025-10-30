@@ -114,112 +114,8 @@ class JiraIntegration:
         """Cria uma tarefa no Jira com formatação Markdown para Jira"""
         url = f"{self.jira_url}/rest/api/3/issue"
         
-        # Converte markdown para formato Jira ADF (Atlassian Document Format)
-        # Processa a descrição para criar estrutura adequada
-        content_blocks = []
-        
-        # Divide a descrição em seções
-        sections = description.split('\n\n')
-        
-        for section in sections:
-            if not section.strip():
-                continue
-                
-            lines = section.split('\n')
-            paragraph_content = []
-            
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                
-                # Detecta títulos em negrito (*Goal*, *Description*, etc)
-                if line.startswith('*') and line.endswith('*') and len(line) > 2:
-                    # Adiciona parágrafo anterior se existir
-                    if paragraph_content:
-                        content_blocks.append({
-                            "type": "paragraph",
-                            "content": paragraph_content
-                        })
-                        paragraph_content = []
-                    
-                    # Adiciona título
-                    content_blocks.append({
-                        "type": "heading",
-                        "attrs": {"level": 3},
-                        "content": [{
-                            "type": "text",
-                            "text": line.strip('*')
-                        }]
-                    })
-                # Detecta bullets (linhas que começam com •)
-                elif line.startswith('•'):
-                    # Adiciona parágrafo anterior se existir
-                    if paragraph_content:
-                        content_blocks.append({
-                            "type": "paragraph",
-                            "content": paragraph_content
-                        })
-                        paragraph_content = []
-                    
-                    # Adiciona item de lista
-                    if not content_blocks or content_blocks[-1].get("type") != "bulletList":
-                        content_blocks.append({
-                            "type": "bulletList",
-                            "content": []
-                        })
-                    
-                    content_blocks[-1]["content"].append({
-                        "type": "listItem",
-                        "content": [{
-                            "type": "paragraph",
-                            "content": [{
-                                "type": "text",
-                                "text": line.lstrip('•').strip()
-                            }]
-                        }]
-                    })
-                # Detecta linha separadora (---)
-                elif line.startswith('---'):
-                    if paragraph_content:
-                        content_blocks.append({
-                            "type": "paragraph",
-                            "content": paragraph_content
-                        })
-                        paragraph_content = []
-                    content_blocks.append({"type": "rule"})
-                # Detecta itálico (_texto_)
-                elif line.startswith('_') and line.endswith('_'):
-                    paragraph_content.append({
-                        "type": "text",
-                        "text": line.strip('_'),
-                        "marks": [{"type": "em"}]
-                    })
-                # Texto normal
-                else:
-                    if paragraph_content:
-                        paragraph_content.append({"type": "text", "text": "\n"})
-                    paragraph_content.append({
-                        "type": "text",
-                        "text": line
-                    })
-            
-            # Adiciona último parágrafo da seção
-            if paragraph_content:
-                content_blocks.append({
-                    "type": "paragraph",
-                    "content": paragraph_content
-                })
-        
-        # Se não houver blocos, cria um parágrafo simples
-        if not content_blocks:
-            content_blocks = [{
-                "type": "paragraph",
-                "content": [{
-                    "type": "text",
-                    "text": description if description else "No description provided"
-                }]
-            }]
+        # Converte descrição para formato Jira ADF
+        content_blocks = self._parse_description(description)
         
         payload = {
             "fields": {
@@ -254,35 +150,274 @@ class JiraIntegration:
                 "error": str(e),
                 "details": response.text if 'response' in locals() else ""
             }
+    
+    def criar_subtask(self, parent_key, summary, description="", priority="Medium"):
+        """Cria uma subtask linkada a uma história"""
+        url = f"{self.jira_url}/rest/api/3/issue"
+        
+        # Processa descrição
+        content_blocks = self._parse_description(description)
+        
+        payload = {
+            "fields": {
+                "project": {"key": self.project_key},
+                "parent": {"key": parent_key},
+                "summary": summary,
+                "description": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": content_blocks
+                },
+                "issuetype": {"name": "Subtask"},
+                "priority": {"name": priority}
+            }
+        }
+        
+        try:
+            response = requests.post(url, data=json.dumps(payload), 
+                                   headers=self.headers, auth=self.auth)
+            response.raise_for_status()
+            result = response.json()
+            return {
+                "success": True,
+                "key": result['key'],
+                "url": f"{self.jira_url}/browse/{result['key']}"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "details": response.text if 'response' in locals() else ""
+            }
+    
+    def _parse_description(self, description):
+        """Converte markdown para formato Jira ADF"""
+        content_blocks = []
+        
+        if not description:
+            return [{
+                "type": "paragraph",
+                "content": [{"type": "text", "text": "No description provided"}]
+            }]
+        
+        sections = description.split('\n\n')
+        
+        for section in sections:
+            if not section.strip():
+                continue
+                
+            lines = section.split('\n')
+            paragraph_content = []
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Títulos em negrito
+                if line.startswith('*') and line.endswith('*') and len(line) > 2:
+                    if paragraph_content:
+                        content_blocks.append({
+                            "type": "paragraph",
+                            "content": paragraph_content
+                        })
+                        paragraph_content = []
+                    
+                    content_blocks.append({
+                        "type": "heading",
+                        "attrs": {"level": 3},
+                        "content": [{
+                            "type": "text",
+                            "text": line.strip('*')
+                        }]
+                    })
+                # Bullets
+                elif line.startswith('•'):
+                    if paragraph_content:
+                        content_blocks.append({
+                            "type": "paragraph",
+                            "content": paragraph_content
+                        })
+                        paragraph_content = []
+                    
+                    if not content_blocks or content_blocks[-1].get("type") != "bulletList":
+                        content_blocks.append({
+                            "type": "bulletList",
+                            "content": []
+                        })
+                    
+                    content_blocks[-1]["content"].append({
+                        "type": "listItem",
+                        "content": [{
+                            "type": "paragraph",
+                            "content": [{
+                                "type": "text",
+                                "text": line.lstrip('•').strip()
+                            }]
+                        }]
+                    })
+                # Linha separadora
+                elif line.startswith('---'):
+                    if paragraph_content:
+                        content_blocks.append({
+                            "type": "paragraph",
+                            "content": paragraph_content
+                        })
+                        paragraph_content = []
+                    content_blocks.append({"type": "rule"})
+                # Itálico
+                elif line.startswith('_') and line.endswith('_'):
+                    paragraph_content.append({
+                        "type": "text",
+                        "text": line.strip('_'),
+                        "marks": [{"type": "em"}]
+                    })
+                # Texto normal
+                else:
+                    if paragraph_content:
+                        paragraph_content.append({"type": "text", "text": "\n"})
+                    paragraph_content.append({
+                        "type": "text",
+                        "text": line
+                    })
+            
+            if paragraph_content:
+                content_blocks.append({
+                    "type": "paragraph",
+                    "content": paragraph_content
+                })
+        
+        if not content_blocks:
+            content_blocks = [{
+                "type": "paragraph",
+                "content": [{
+                    "type": "text",
+                    "text": description
+                }]
+            }]
+        
+        return content_blocks
 
 # Inicializa o app Slack
 app = App(token=os.getenv("SLACK_BOT_TOKEN"))
 jira = JiraIntegration()
+ai_generator = AITaskGenerator()
 
-# Comando slash: /create-task
+# Comando slash: /create-task com IA
 @app.command("/create-task")
-def handle_create_task_command(ack, command, respond):
-    """Command to create task quickly"""
+def handle_create_task_command(ack, command, respond, client):
+    """Command to create task with AI processing"""
     ack()
     
     text = command['text'].strip()
     if not text:
-        respond("❌ Please provide the task title.\nExample: `/create-task Fix login bug`")
+        respond("❌ Please provide a description of what you want to implement.\n"
+                "Example: `/create-task implement progressive discount system for Magento with configurable thresholds`")
         return
     
-    respond("⏳ Creating task in Jira...")
+    user_id = command['user_id']
     
-    result = jira.criar_tarefa(
-        summary=text,
-        description=f"Task created via Slack by <@{command['user_id']}>",
-        issue_type="Task",
-        priority="Medium"
+    # Mensagem inicial
+    respond("🤖 *AI is analyzing your request...*\n"
+            "This will take a few seconds as I break it down into story and subtasks.")
+    
+    # Gera tasks com IA
+    print(f"[DEBUG] Calling AI with prompt: {text[:100]}...")
+    ai_result = ai_generator.generate_tasks_from_prompt(text)
+    
+    print(f"[DEBUG] AI Result: {ai_result}")
+    
+    if not ai_result['success']:
+        respond(f"❌ AI processing failed: {ai_result['error']}")
+        return
+    
+    tasks_data = ai_result['data']
+    print(f"[DEBUG] Tasks data: {json.dumps(tasks_data, indent=2)}")
+    
+    story_data = tasks_data.get('story', {})
+    subtasks_data = tasks_data.get('subtasks', [])
+    
+    # Cria a história principal
+    respond(f"📦 *Creating main story...*")
+    
+    print(f"[DEBUG] Creating story: {story_data.get('title', 'No title')}")
+    
+    story_description = format_description(
+        story_data.get('goal', ''),
+        story_data.get('description', ''),
+        story_data.get('acceptance_criteria', []),
+        user_id
     )
     
-    if result['success']:
-        respond(f"✅ Task created successfully!\n🔗 *{result['key']}*: {result['url']}")
-    else:
-        respond(f"❌ Error creating task: {result['error']}")
+    story_result = jira.criar_tarefa(
+        summary=story_data.get('title', 'AI Generated Story'),
+        description=story_description,
+        issue_type="Story",
+        priority="Medium",
+        labels=["ai-generated"]
+    )
+    
+    print(f"[DEBUG] Story result: {story_result}")
+    
+    if not story_result['success']:
+        error_details = story_result.get('details', 'No details')
+        respond(f"❌ Failed to create story: {story_result['error']}\n\nDetails: {error_details[:500]}")
+        return
+    
+    story_key = story_result['key']
+    story_url = story_result['url']
+    
+    # Cria as subtasks
+    respond(f"✅ Story created: *{story_key}*\n"
+            f"📋 Creating {len(subtasks_data)} subtasks...")
+    
+    created_subtasks = []
+    for idx, subtask in enumerate(subtasks_data, 1):
+        subtask_description = format_description(
+            subtask.get('goal', ''),
+            subtask.get('description', ''),
+            subtask.get('acceptance_criteria', []),
+            user_id
+        )
+        
+        # Cria subtask e linka à história
+        subtask_result = jira.criar_subtask(
+            parent_key=story_key,
+            summary=subtask.get('title', f'Subtask {idx}'),
+            description=subtask_description,
+            priority="Medium"
+        )
+        
+        if subtask_result['success']:
+            created_subtasks.append(f"  • {subtask_result['key']}: {subtask.get('title', '')}")
+    
+    # Mensagem final com resumo
+    subtasks_list = "\n".join(created_subtasks) if created_subtasks else "  (none created)"
+    
+    respond(
+        f"✅ *All tasks created successfully!*\n\n"
+        f"📦 *Main Story:* {story_key}\n"
+        f"🔗 {story_url}\n\n"
+        f"📋 *Subtasks created ({len(created_subtasks)}/{len(subtasks_data)}):*\n"
+        f"{subtasks_list}\n\n"
+        f"_Generated by AI from your description_"
+    )
+
+def format_description(goal, description, acceptance_criteria, user_id):
+    """Formata descrição no padrão refinado"""
+    criteria_bullets = "\n".join([f"• {criterion}" for criterion in acceptance_criteria])
+    
+    return f"""*Goal*
+{goal}
+
+*Description*
+{description}
+
+*Acceptance Criteria*
+{criteria_bullets}
+
+---
+_Created via Slack by <@{user_id}>_"""
 
 # Interactive modal to create task with more details
 @app.command("/new-task")
