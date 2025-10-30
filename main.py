@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""
+Bot Slack para criar tarefas no Jira automaticamente
+Requer: pip install slack-bolt requests python-dotenv
+"""
+
+import os
+import re
+from slack_bolt import App
+from slack_bolt.adapter.socket_mode import SocketModeHandler
+import requests
+from requests.auth import HTTPBasicAuth
+import json
+
+# Tenta carregar do .env local, senão usa variáveis de ambiente do sistema
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except:
+    pass
+
+class JiraIntegration:
+    def __init__(self):
+        self.jira_url = os.getenv('JIRA_URL').rstrip('/')
+        self.jira_email = os.getenv('JIRA_EMAIL')
+        self.jira_token = os.getenv('JIRA_API_TOKEN')
+        self.project_key = os.getenv('JIRA_PROJECT_KEY')
+        
+        self.auth = HTTPBasicAuth(self.jira_email, self.jira_token)
+        self.headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
+    
+    def criar_tarefa(self, summary, description="", issue_type="Task", priority="Medium", labels=None):
+        """Cria uma tarefa no Jira"""
+        url = f"{self.jira_url}/rest/api/3/issue"
+        
+        payload = {
+            "fields": {
+                "project": {"key": self.project_key},
+                "summary": summary,
+                "description": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [{
+                        "type": "paragraph",
+                        "content": [{
+                            "type": "text",
+                            "text": description
+                        }]
+                    }]
+                },
+                "issuetype": {"name": issue_type},
+                "priority": {"name": priority}
+            }
+        }
+        
+        if labels:
+            payload["fields"]["labels"] = labels
+        
+        try:
+            response = requests.post(url, data=json.dumps(payload), 
+                                   headers=self.headers, auth=self.auth)
+            response.raise_for_status()
+            result = response.json()
+            return {
+                "success": True,
+                "key": result['key'],
+                "url": f"{self.jira_url}/browse/{result['key']}"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "details": response.text if 'response' in locals() else ""
+            }
+
+# Inicializa o app Slack
+app = App(token=os.getenv("SLACK_BOT_TOKEN"))
+jira = JiraIntegration()
+
+# Comando slash: /criar-tarefa
+@app.command("/criar-tarefa")
+def handle_criar_tarefa_command(ack, command, respond):
+    """Comando para criar tarefa de forma rápida"""
+    ack()
+    
+    text = command['text'].strip()
+    if not text:
+        respond("❌ Por favor, informe o título da tarefa.\nExemplo: `/criar-tarefa Corrigir bug no login`")
+        return
+    
+    respond("⏳ Criando tarefa no Jira...")
+    
+    result = jira.criar_tarefa(
+        summary=text,
+        description=f"Tarefa criada via Slack por <@{command['user_id']}>",
+        issue_type="Task",
+        priority="Medium"
+    )
+    
+    if result['success']:
+        respond(f"✅ Tarefa criada com sucesso!\n🔗 *{result['key']}*: {result['url']}")
+    else:
+        respond(f"❌ Erro ao criar tarefa: {result['error']}")
+
+# Modal interativo para criar tarefa com mais detalhes
+@app.command("/nova-tarefa")
+def open_modal(ack, body, client):
+    """Abre modal com formulário completo"""
+    ack()
+    
+    client.views_open(
+        trigger_id=body["trigger_id"],
+        view={
+            "type": "modal",
+            "callback_id": "tarefa_modal",
+            "title": {"type": "plain_text", "text": "Nova Tarefa Jira"},
+            "submit": {"type": "plain_text", "text": "Criar Tarefa"},
+            "blocks": [
+                {
+                    "type": "input",
+                    "block_id": "titulo",
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "titulo_input",
+                        "placeholder": {"type": "plain_text", "text": "Ex: Implementar autenticação"}
+                    },
+                    "label": {"type": "plain_text", "text": "Título *"}
+                },
+                {
+                    "type": "input",
+                    "block_id": "descricao",
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "descricao_input",
+                        "multiline": True,
+                        "placeholder": {"type": "plain_text", "text": "Descreva os detalhes da tarefa..."}
+                    },
+                    "label": {"type": "plain_text", "text": "Descrição"},
+                    "optional": True
+                },
+                {
+                    "type": "input",
+                    "block_id": "tipo",
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "tipo_select",
+                        "placeholder": {"type": "plain_text", "text": "Selecione o tipo"},
+                        "options": [
+                            {"text": {"type": "plain_text", "text": "Task"}, "value": "Task"},
+                            {"text": {"type": "plain_text", "text": "Bug"}, "value": "Bug"},
+                            {"text": {"type": "plain_text", "text": "Story"}, "value": "Story"}
+                        ],
+                        "initial_option": {"text": {"type": "plain_text", "text": "Task"}, "value": "Task"}
+                    },
+                    "label": {"type": "plain_text", "text": "Tipo"}
+                },
+                {
+                    "type": "input",
+                    "block_id": "prioridade",
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "prioridade_select",
+                        "placeholder": {"type": "plain_text", "text": "Selecione a prioridade"},
+                        "options": [
+                            {"text": {"type": "plain_text", "text": "🔴 Highest"}, "value": "Highest"},
+                            {"text": {"type": "plain_text", "text": "🟠 High"}, "value": "High"},
+                            {"text": {"type": "plain_text", "text": "🟡 Medium"}, "value": "Medium"},
+                            {"text": {"type": "plain_text", "text": "🟢 Low"}, "value": "Low"},
+                            {"text": {"type": "plain_text", "text": "⚪ Lowest"}, "value": "Lowest"}
+                        ],
+                        "initial_option": {"text": {"type": "plain_text", "text": "🟡 Medium"}, "value": "Medium"}
+                    },
+                    "label": {"type": "plain_text", "text": "Prioridade"}
+                },
+                {
+                    "type": "input",
+                    "block_id": "labels",
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "labels_input",
+                        "placeholder": {"type": "plain_text", "text": "Ex: backend, urgente, api"}
+                    },
+                    "label": {"type": "plain_text", "text": "Labels (separadas por vírgula)"},
+                    "optional": True
+                }
+            ]
+        }
+    )
+
+@app.view("tarefa_modal")
+def handle_submission(ack, body, client, view):
+    """Processa o envio do formulário"""
+    values = view["state"]["values"]
+    
+    titulo = values["titulo"]["titulo_input"]["value"]
+    descricao = values["descricao"]["descricao_input"].get("value", "")
+    tipo = values["tipo"]["tipo_select"]["selected_option"]["value"]
+    prioridade = values["prioridade"]["prioridade_select"]["selected_option"]["value"]
+    labels_text = values["labels"]["labels_input"].get("value", "")
+    
+    # Processa labels
+    labels = [l.strip() for l in labels_text.split(",") if l.strip()] if labels_text else None
+    
+    # Adiciona informação do criador
+    user_id = body["user"]["id"]
+    descricao_completa = f"{descricao}\n\n---\nCriado via Slack por <@{user_id}>"
+    
+    ack()
+    
+    # Cria a tarefa
+    result = jira.criar_tarefa(
+        summary=titulo,
+        description=descricao_completa,
+        issue_type=tipo,
+        priority=prioridade,
+        labels=labels
+    )
+    
+    # Envia mensagem de confirmação
+    if result['success']:
+        client.chat_postMessage(
+            channel=body["user"]["id"],
+            text=f"✅ *Tarefa criada com sucesso!*\n\n"
+                 f"*Chave:* {result['key']}\n"
+                 f"*Tipo:* {tipo}\n"
+                 f"*Prioridade:* {prioridade}\n"
+                 f"*Link:* {result['url']}"
+        )
+    else:
+        client.chat_postMessage(
+            channel=body["user"]["id"],
+            text=f"❌ *Erro ao criar tarefa*\n{result['error']}"
+        )
+
+# Menções no canal (@bot criar tarefa...)
+@app.event("app_mention")
+def handle_mention(event, say):
+    """Responde quando o bot é mencionado"""
+    text = event['text'].lower()
+    
+    if 'ajuda' in text or 'help' in text:
+        say(
+            f"👋 Olá! Eu crio tarefas no Jira automaticamente.\n\n"
+            f"*Comandos disponíveis:*\n"
+            f"• `/criar-tarefa [título]` - Cria tarefa rápida\n"
+            f"• `/nova-tarefa` - Abre formulário completo\n"
+            f"• Me mencione com `@bot ajuda` para ver esta mensagem"
+        )
+    else:
+        say("Use `/nova-tarefa` para criar uma tarefa no Jira! 🎯")
+
+if __name__ == "__main__":
+    # Inicia o bot em modo Socket
+    handler = SocketModeHandler(app, os.getenv("SLACK_APP_TOKEN"))
+    print("⚡ Bot Slack está rodando!")
+    handler.start()
