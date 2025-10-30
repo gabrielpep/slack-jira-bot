@@ -70,8 +70,7 @@ Rules:
                 {"role": "user", "content": f"Break down this requirement into a story and subtasks:\n\n{user_prompt}"}
             ],
             "temperature": 0.3,
-            "max_tokens": 3000,
-            "response_format": {"type": "json_object"}
+            "max_tokens": 3000
         }
         
         headers = {
@@ -79,19 +78,48 @@ Rules:
             "Content-Type": "application/json"
         }
         
+        print(f"[DEBUG] Groq API Key (first 20 chars): {self.groq_api_key[:20] if self.groq_api_key else 'MISSING'}...")
+        print(f"[DEBUG] Groq Request payload model: {payload['model']}")
+        
         try:
-            response = requests.post(self.api_url, json=payload, headers=headers)
+            response = requests.post(self.api_url, json=payload, headers=headers, timeout=30)
+            
+            print(f"[DEBUG] Groq Response Status: {response.status_code}")
+            print(f"[DEBUG] Groq Response: {response.text[:500]}")
+            
             response.raise_for_status()
             result = response.json()
             
             content = result['choices'][0]['message']['content']
+            print(f"[DEBUG] AI Generated content (first 200 chars): {content[:200]}")
+            
+            # Remove markdown code blocks se existirem
+            content = content.strip()
+            if content.startswith('```'):
+                content = '\n'.join(content.split('\n')[1:-1])
+            
             tasks_data = json.loads(content)
             
             return {
                 "success": True,
                 "data": tasks_data
             }
+        except requests.exceptions.HTTPError as e:
+            error_msg = f"HTTP {response.status_code}: {response.text[:500]}"
+            print(f"[ERROR] Groq API Error: {error_msg}")
+            return {
+                "success": False,
+                "error": error_msg
+            }
+        except json.JSONDecodeError as e:
+            print(f"[ERROR] JSON Parse Error: {str(e)}")
+            print(f"[ERROR] Content was: {content[:500] if 'content' in locals() else 'No content'}")
+            return {
+                "success": False,
+                "error": f"Failed to parse AI response: {str(e)}"
+            }
         except Exception as e:
+            print(f"[ERROR] Unexpected error: {str(e)}")
             return {
                 "success": False,
                 "error": str(e)
