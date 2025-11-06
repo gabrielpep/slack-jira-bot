@@ -80,8 +80,10 @@ Rules:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Break down this requirement into a story and subtasks:\n\n{user_prompt}"}
             ],
-            "temperature": 0.3,
-            "max_tokens": 3000
+            "temperature": 0.0,
+            "max_tokens": 3000,
+            # Força JSON quando suportado
+            "response_format": {"type": "json_object"}
         }
         
         headers = {
@@ -155,6 +157,19 @@ Rules:
             raw = remove_code_fences(content)
             raw = sanitize_control_chars(raw)
 
+            # Normaliza aspas “inteligentes” e apóstrofos para JSON válido
+            translation_table = {
+                ord('\u201c'): '"',  # “
+                ord('\u201d'): '"',  # ”
+                ord('\u201e'): '"',  # „
+                ord('\u201f'): '"',  # ‟
+                ord('\u2018'): '"',  # ‘ -> usar " para evitar chaves não aspiradas
+                ord('\u2019'): '"',  # ’
+                ord('\u2032'): '"',  # ′
+                ord('\u2033'): '"',  # ″
+            }
+            raw = raw.translate(translation_table)
+
             parsed = None
             # 1) tenta parse direto
             try:
@@ -179,7 +194,11 @@ Rules:
                         pass
 
             if parsed is None:
-                raise json.JSONDecodeError("Failed to parse AI response after sanitation and extraction.", raw, 0)
+                logging.error("Failed to parse AI response after sanitation and extraction.")
+                return {
+                    "success": False,
+                    "error": "Failed to parse AI response",
+                }
 
             tasks_data = parsed
             
