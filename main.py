@@ -190,6 +190,13 @@ class JiraIntegration:
         )
         self.session.mount('https://', HTTPAdapter(max_retries=retries))
         self.session.mount('http://', HTTPAdapter(max_retries=retries))
+
+        # Alternativas de tipo de subtask para fallback
+        self._subtask_type_alternatives = [self.subtask_type]
+        if self.subtask_type.lower() == 'sub-task' and 'subtask' not in [s.lower() for s in self._subtask_type_alternatives]:
+            self._subtask_type_alternatives.append('Subtask')
+        if self.subtask_type.lower() == 'subtask' and 'sub-task' not in [s.lower() for s in self._subtask_type_alternatives]:
+            self._subtask_type_alternatives.append('Sub-task')
     
     def criar_tarefa(self, summary, description="", issue_type="Task", priority="Medium", labels=None):
         """Cria uma tarefa no Jira com formatação Markdown para Jira"""
@@ -265,20 +272,40 @@ class JiraIntegration:
         }
         
         try:
-            response = self.session.post(
-                url,
-                json=payload,
-                headers=self.headers,
-                auth=self.auth,
-                timeout=(5, 30)
-            )
-            response.raise_for_status()
-            result = response.json()
-            return {
-                "success": True,
-                "key": result['key'],
-                "url": f"{self.jira_url}/browse/{result['key']}"
-            }
+            # Tenta com tipo configurado; se 400, tenta alternativas conhecidas
+            last_error = None
+            for idx, subtask_type_name in enumerate(self._subtask_type_alternatives):
+                payload["fields"]["issuetype"]["name"] = subtask_type_name
+                try:
+                    response = self.session.post(
+                        url,
+                        json=payload,
+                        headers=self.headers,
+                        auth=self.auth,
+                        timeout=(5, 30)
+                    )
+                    if response.status_code == 400 and idx < len(self._subtask_type_alternatives) - 1:
+                        # Log e tenta próxima alternativa
+                        logging.warning(f"Falha ao criar subtask com tipo '{subtask_type_name}'. Tentando alternativa...")
+                        continue
+                    response.raise_for_status()
+                    result = response.json()
+                    return {
+                        "success": True,
+                        "key": result['key'],
+                        "url": f"{self.jira_url}/browse/{result['key']}"
+                    }
+                except requests.exceptions.RequestException as e:
+                    last_error = e
+                    # Se não houver mais alternativas, retorna erro
+                    if idx == len(self._subtask_type_alternatives) - 1:
+                        raise
+                    # Se for erro diferente de 400, não adianta trocar tipo; propaga
+                    if getattr(e, 'response', None) is not None and e.response is not None and e.response.status_code != 400:
+                        raise
+                    logging.warning(f"Erro ao criar subtask com '{subtask_type_name}': {e}. Tentando próxima alternativa...")
+            # Se sair do loop sem sucesso
+            raise last_error if last_error else requests.exceptions.RequestException("Falha desconhecida ao criar subtask")
         except requests.exceptions.RequestException as e:
             details = ""
             if getattr(e, 'response', None) is not None:
