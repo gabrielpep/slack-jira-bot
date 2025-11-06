@@ -5,7 +5,7 @@ Requer: pip install slack-bolt requests python-dotenv flask
 """
 
 import os
-import re
+import logging
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 import requests
@@ -16,8 +16,18 @@ import json
 try:
     from dotenv import load_dotenv
     load_dotenv()
-except:
+except ImportError:
+    # dotenv não instalado em produção; seguir sem carregar .env
     pass
+
+# Configuração simples de logging controlada por LOG_LEVEL
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format="%(levelname)s: %(message)s")
+
+def assert_required_env(var_names):
+    missing = [name for name in var_names if not os.getenv(name)]
+    if missing:
+        raise RuntimeError(f"Variáveis de ambiente faltando: {', '.join(missing)}")
 
 class AITaskGenerator:
     def __init__(self):
@@ -78,27 +88,53 @@ Rules:
             "Content-Type": "application/json"
         }
         
-        print(f"[DEBUG] Groq API Key (first 20 chars): {self.groq_api_key[:20] if self.groq_api_key else 'MISSING'}...")
-        print(f"[DEBUG] Groq Request payload model: {payload['model']}")
+        logging.debug(f"Groq request model: {payload['model']}")
         
         try:
             response = requests.post(self.api_url, json=payload, headers=headers, timeout=30)
             
-            print(f"[DEBUG] Groq Response Status: {response.status_code}")
-            print(f"[DEBUG] Groq Response: {response.text[:500]}")
+            logging.debug(f"Groq response status: {response.status_code}")
+            logging.debug(f"Groq response preview: {response.text[:500]}")
             
             response.raise_for_status()
             result = response.json()
             
             content = result['choices'][0]['message']['content']
-            print(f"[DEBUG] AI Generated content (first 200 chars): {content[:200]}")
+            logging.debug(f"AI content preview: {content[:200]}")
             
-            # Remove markdown code blocks se existirem
-            content = content.strip()
-            if content.startswith('```'):
-                content = '\n'.join(content.split('\n')[1:-1])
-            
-            tasks_data = json.loads(content)
+            # Remoção resiliente de cercas markdown (``` e ```json)
+            raw = content.strip()
+            parsed = None
+            if raw.startswith('```'):
+                lines = raw.split('\n')
+                # Se primeira linha contém ``` ou ```json, procurar a última linha de ```
+                if lines:
+                    fence_end_idx = None
+                    for i in range(len(lines) - 1, -1, -1):
+                        if lines[i].strip().startswith('```'):
+                            fence_end_idx = i
+                            break
+                    if fence_end_idx is not None and fence_end_idx > 0:
+                        maybe_json = '\n'.join(lines[1:fence_end_idx])
+                        try:
+                            parsed = json.loads(maybe_json)
+                        except json.JSONDecodeError:
+                            parsed = None
+            if parsed is None:
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError:
+                    # Fallback: tentar extrair substring entre primeira '{' e última '}'
+                    start = raw.find('{')
+                    end = raw.rfind('}')
+                    if start != -1 and end != -1 and end > start:
+                        try:
+                            parsed = json.loads(raw[start:end+1])
+                        except json.JSONDecodeError as e:
+                            raise e
+                    else:
+                        raise
+            tasks_data = parsed
             
             return {
                 "success": True,
@@ -106,20 +142,20 @@ Rules:
             }
         except requests.exceptions.HTTPError as e:
             error_msg = f"HTTP {response.status_code}: {response.text[:500]}"
-            print(f"[ERROR] Groq API Error: {error_msg}")
+            logging.error(f"Groq API error: {error_msg}")
             return {
                 "success": False,
                 "error": error_msg
             }
         except json.JSONDecodeError as e:
-            print(f"[ERROR] JSON Parse Error: {str(e)}")
-            print(f"[ERROR] Content was: {content[:500] if 'content' in locals() else 'No content'}")
+            logging.error(f"JSON parse error: {str(e)}")
+            logging.debug(f"Content was: {content[:500] if 'content' in locals() else 'No content'}")
             return {
                 "success": False,
                 "error": f"Failed to parse AI response: {str(e)}"
             }
         except Exception as e:
-            print(f"[ERROR] Unexpected error: {str(e)}")
+            logging.error(f"Unexpected error: {str(e)}")
             return {
                 "success": False,
                 "error": str(e)
@@ -127,16 +163,33 @@ Rules:
 
 class JiraIntegration:
     def __init__(self):
-        self.jira_url = os.getenv('JIRA_URL').rstrip('/')
+        self.jira_url = (os.getenv('JIRA_URL') or '').rstrip('/')
         self.jira_email = os.getenv('JIRA_EMAIL')
         self.jira_token = os.getenv('JIRA_API_TOKEN')
         self.project_key = os.getenv('JIRA_PROJECT_KEY')
-        
+        self.subtask_type = os.getenv('JIRA_SUBTASK_TYPE', 'Sub-task')
+
+        if not all([self.jira_url, self.jira_email, self.jira_token, self.project_key]):
+            raise RuntimeError("Configuração do Jira incompleta: verifique JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN, JIRA_PROJECT_KEY")
+
         self.auth = HTTPBasicAuth(self.jira_email, self.jira_token)
         self.headers = {
             "Accept": "application/json",
             "Content-Type": "application/json"
         }
+
+        # Session com retries e backoff
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+        self.session = requests.Session()
+        retries = Retry(
+            total=5,
+            backoff_factor=0.5,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "OPTIONS", "POST", "PUT", "DELETE", "PATCH"]
+        )
+        self.session.mount('https://', HTTPAdapter(max_retries=retries))
+        self.session.mount('http://', HTTPAdapter(max_retries=retries))
     
     def criar_tarefa(self, summary, description="", issue_type="Task", priority="Medium", labels=None):
         """Cria uma tarefa no Jira com formatação Markdown para Jira"""
@@ -163,8 +216,13 @@ class JiraIntegration:
             payload["fields"]["labels"] = labels
         
         try:
-            response = requests.post(url, data=json.dumps(payload), 
-                                   headers=self.headers, auth=self.auth)
+            response = self.session.post(
+                url,
+                json=payload,
+                headers=self.headers,
+                auth=self.auth,
+                timeout=(5, 30)
+            )
             response.raise_for_status()
             result = response.json()
             return {
@@ -172,11 +230,17 @@ class JiraIntegration:
                 "key": result['key'],
                 "url": f"{self.jira_url}/browse/{result['key']}"
             }
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
+            details = ""
+            if getattr(e, 'response', None) is not None:
+                try:
+                    details = e.response.text
+                except Exception:
+                    details = ""
             return {
                 "success": False,
                 "error": str(e),
-                "details": response.text if 'response' in locals() else ""
+                "details": details
             }
     
     def criar_subtask(self, parent_key, summary, description=""):
@@ -196,13 +260,18 @@ class JiraIntegration:
                     "version": 1,
                     "content": content_blocks
                 },
-                "issuetype": {"name": "Subtask"}
+                "issuetype": {"name": self.subtask_type}
             }
         }
         
         try:
-            response = requests.post(url, data=json.dumps(payload), 
-                                   headers=self.headers, auth=self.auth)
+            response = self.session.post(
+                url,
+                json=payload,
+                headers=self.headers,
+                auth=self.auth,
+                timeout=(5, 30)
+            )
             response.raise_for_status()
             result = response.json()
             return {
@@ -210,11 +279,17 @@ class JiraIntegration:
                 "key": result['key'],
                 "url": f"{self.jira_url}/browse/{result['key']}"
             }
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
+            details = ""
+            if getattr(e, 'response', None) is not None:
+                try:
+                    details = e.response.text
+                except Exception:
+                    details = ""
             return {
                 "success": False,
                 "error": str(e),
-                "details": response.text if 'response' in locals() else ""
+                "details": details
             }
     
     def _parse_description(self, description):
@@ -259,7 +334,7 @@ class JiraIntegration:
                         }]
                     })
                 # Bullets
-                elif line.startswith('•'):
+                elif line.startswith('•') or line.startswith('- ') or line.startswith('* '):
                     if paragraph_content:
                         content_blocks.append({
                             "type": "paragraph",
@@ -279,8 +354,32 @@ class JiraIntegration:
                             "type": "paragraph",
                             "content": [{
                                 "type": "text",
-                                "text": line.lstrip('•').strip()
+                                "text": line.lstrip('•').lstrip('- ').lstrip('* ').strip()
                             }]
+                        }]
+                    })
+                # Listas numeradas (e.g., "1. item")
+                elif len(line) > 2 and line[0].isdigit() and line[1] == '.':
+                    if paragraph_content:
+                        content_blocks.append({
+                            "type": "paragraph",
+                            "content": paragraph_content
+                        })
+                        paragraph_content = []
+
+                    if not content_blocks or content_blocks[-1].get("type") != "orderedList":
+                        content_blocks.append({
+                            "type": "orderedList",
+                            "attrs": {"order": int(line[0]) if line[0].isdigit() else 1},
+                            "content": []
+                        })
+
+                    text_part = line.split('.', 1)[1].strip()
+                    content_blocks[-1]["content"].append({
+                        "type": "listItem",
+                        "content": [{
+                            "type": "paragraph",
+                            "content": [{"type": "text", "text": text_part}]
                         }]
                     })
                 # Linha separadora
@@ -325,7 +424,18 @@ class JiraIntegration:
         
         return content_blocks
 
-# Inicializa o app Slack
+# Validação de variáveis de ambiente críticas
+assert_required_env([
+    "SLACK_BOT_TOKEN",
+    "SLACK_APP_TOKEN",
+    "JIRA_URL",
+    "JIRA_EMAIL",
+    "JIRA_API_TOKEN",
+    "JIRA_PROJECT_KEY",
+    "GROQ_API_KEY",
+])
+
+# Inicializa o app Slack e integrações
 app = App(token=os.getenv("SLACK_BOT_TOKEN"))
 jira = JiraIntegration()
 ai_generator = AITaskGenerator()
@@ -349,17 +459,17 @@ def handle_create_task_command(ack, command, respond, client):
             "This will take a few seconds as I break it down into story and subtasks.")
     
     # Gera tasks com IA
-    print(f"[DEBUG] Calling AI with prompt: {text[:100]}...")
+    logging.debug(f"Calling AI with prompt: {text[:100]}...")
     ai_result = ai_generator.generate_tasks_from_prompt(text)
     
-    print(f"[DEBUG] AI Result: {ai_result}")
+    logging.debug(f"AI Result: {ai_result}")
     
     if not ai_result['success']:
         respond(f"❌ AI processing failed: {ai_result['error']}")
         return
     
     tasks_data = ai_result['data']
-    print(f"[DEBUG] Tasks data: {json.dumps(tasks_data, indent=2)}")
+    logging.debug(f"Tasks data: {json.dumps(tasks_data, indent=2)}")
     
     story_data = tasks_data.get('story', {})
     subtasks_data = tasks_data.get('subtasks', [])
@@ -367,7 +477,7 @@ def handle_create_task_command(ack, command, respond, client):
     # Cria a história principal
     respond(f"📦 *Creating main story...*")
     
-    print(f"[DEBUG] Creating story: {story_data.get('title', 'No title')}")
+    logging.debug(f"Creating story: {story_data.get('title', 'No title')}")
     
     story_description = format_description(
         story_data.get('goal', ''),
@@ -384,7 +494,7 @@ def handle_create_task_command(ack, command, respond, client):
         labels=["ai-generated"]
     )
     
-    print(f"[DEBUG] Story result: {story_result}")
+    logging.debug(f"Story result: {story_result}")
     
     if not story_result['success']:
         error_details = story_result.get('details', 'No details')
@@ -400,7 +510,7 @@ def handle_create_task_command(ack, command, respond, client):
     
     created_subtasks = []
     for idx, subtask in enumerate(subtasks_data, 1):
-        print(f"[DEBUG] Creating subtask {idx}/{len(subtasks_data)}: {subtask.get('title', 'No title')}")
+        logging.debug(f"Creating subtask {idx}/{len(subtasks_data)}: {subtask.get('title', 'No title')}")
         
         subtask_description = format_description(
             subtask.get('goal', ''),
@@ -416,13 +526,13 @@ def handle_create_task_command(ack, command, respond, client):
             description=subtask_description
         )
         
-        print(f"[DEBUG] Subtask {idx} result: {subtask_result}")
+        logging.debug(f"Subtask {idx} result: {subtask_result}")
         
         if subtask_result['success']:
             created_subtasks.append(f"  • {subtask_result['key']}: {subtask.get('title', '')}")
         else:
-            print(f"[ERROR] Failed to create subtask {idx}: {subtask_result.get('error', 'Unknown error')}")
-            print(f"[ERROR] Details: {subtask_result.get('details', 'No details')[:500]}")
+            logging.error(f"Failed to create subtask {idx}: {subtask_result.get('error', 'Unknown error')}")
+            logging.error(f"Details: {subtask_result.get('details', 'No details')[:500]}")
     
     # Mensagem final com resumo
     subtasks_list = "\n".join(created_subtasks) if created_subtasks else "  (none created)"
@@ -563,25 +673,26 @@ def open_modal(ack, body, client):
 @app.view("tarefa_modal")
 def handle_submission(ack, body, client, view):
     """Processa o envio do formulário"""
-    values = view["state"]["values"]
-    
-    titulo = values["titulo"]["titulo_input"]["value"]
-    goal = values["goal"]["goal_input"]["value"]
-    descricao = values["descricao"]["descricao_input"]["value"]
-    acceptance_criteria = values["acceptance_criteria"]["acceptance_input"]["value"]
-    tipo = values["tipo"]["tipo_select"]["selected_option"]["value"]
-    prioridade = values["prioridade"]["prioridade_select"]["selected_option"]["value"]
-    labels_text = values["labels"]["labels_input"].get("value", "")
-    
-    # Processa labels
-    labels = [l.strip() for l in labels_text.split(",") if l.strip()] if labels_text else None
-    
-    # Formata os critérios de aceite em bullets
-    criteria_lines = [line.strip() for line in acceptance_criteria.split("\n") if line.strip()]
-    criteria_bullets = "\n".join([f"• {line}" for line in criteria_lines])
-    
-    # Monta a descrição no formato refinado
-    descricao_refinada = f"""*Goal*
+    try:
+        values = view["state"]["values"]
+        
+        titulo = values["titulo"]["titulo_input"]["value"]
+        goal = values["goal"]["goal_input"]["value"]
+        descricao = values["descricao"]["descricao_input"]["value"]
+        acceptance_criteria = values["acceptance_criteria"]["acceptance_input"]["value"]
+        tipo = values["tipo"]["tipo_select"]["selected_option"]["value"]
+        prioridade = values["prioridade"]["prioridade_select"]["selected_option"]["value"]
+        labels_text = values["labels"]["labels_input"].get("value", "")
+        
+        # Processa labels
+        labels = [l.strip() for l in labels_text.split(",") if l.strip()] if labels_text else None
+        
+        # Formata os critérios de aceite em bullets
+        criteria_lines = [line.strip() for line in acceptance_criteria.split("\n") if line.strip()]
+        criteria_bullets = "\n".join([f"• {line}" for line in criteria_lines])
+        
+        # Monta a descrição no formato refinado
+        descricao_refinada = f"""*Goal*
 {goal}
 
 *Description*
@@ -592,32 +703,39 @@ def handle_submission(ack, body, client, view):
 
 ---
 _Created via Slack by <@{body["user"]["id"]}>_"""
-    
-    ack()
-    
-    # Cria a tarefa
-    result = jira.criar_tarefa(
-        summary=titulo,
-        description=descricao_refinada,
-        issue_type=tipo,
-        priority=prioridade,
-        labels=labels
-    )
-    
-    # Envia mensagem de confirmação
-    if result['success']:
-        client.chat_postMessage(
-            channel=body["user"]["id"],
-            text=f"✅ *Task created successfully!*\n\n"
-                 f"*Key:* {result['key']}\n"
-                 f"*Type:* {tipo}\n"
-                 f"*Priority:* {prioridade}\n"
-                 f"*Link:* {result['url']}"
+        
+        ack()
+        
+        # Cria a tarefa
+        result = jira.criar_tarefa(
+            summary=titulo,
+            description=descricao_refinada,
+            issue_type=tipo,
+            priority=prioridade,
+            labels=labels
         )
-    else:
+        
+        # Envia mensagem de confirmação
+        if result['success']:
+            client.chat_postMessage(
+                channel=body["user"]["id"],
+                text=f"✅ *Task created successfully!*\n\n"
+                     f"*Key:* {result['key']}\n"
+                     f"*Type:* {tipo}\n"
+                     f"*Priority:* {prioridade}\n"
+                     f"*Link:* {result['url']}"
+            )
+        else:
+            client.chat_postMessage(
+                channel=body["user"]["id"],
+                text=f"❌ *Error creating task*\n{result['error']}"
+            )
+    except Exception as e:
+        ack()
+        logging.error(f"Erro ao processar submissão do modal: {e}")
         client.chat_postMessage(
             channel=body["user"]["id"],
-            text=f"❌ *Error creating task*\n{result['error']}"
+            text="❌ Ocorreu um erro ao processar sua solicitação. Tente novamente mais tarde."
         )
 
 # Menções no canal (@bot criar tarefa...)
