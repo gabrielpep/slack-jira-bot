@@ -102,14 +102,19 @@ Rules:
             response.raise_for_status()
             result = response.json()
             
-            content = result['choices'][0]['message']['content']
+            content = result['choices'][0]['message'].get('content')
+            # Se o provedor já retornar JSON estruturado no campo content
+            if isinstance(content, dict):
+                logging.debug("AI content is already a dict; using directly.")
+                return {"success": True, "data": content}
+            content = content or ""
             logging.debug(f"AI content preview: {content[:200]}")
             
             def remove_code_fences(text):
                 t = text.strip()
                 if t.startswith('```'):
                     lines = t.split('\n')
-                    # remove primeira linha ``` ou ```json
+                    # remove primeira linha ``` ou ```json (com espaços)
                     # encontra última linha com ```
                     fence_end_idx = None
                     for i in range(len(lines) - 1, -1, -1):
@@ -122,7 +127,11 @@ Rules:
 
             def sanitize_control_chars(text):
                 # remove caracteres de controle inválidos JSON (mantém \n, \r, \t)
-                return re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", text)
+                t = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", text)
+                # remove BOM e zero-width/invisíveis comuns
+                t = t.replace('\ufeff', '')
+                t = re.sub(r"[\u200B-\u200F\u202A-\u202E\u2060-\u206F]", "", t)
+                return t
 
             def extract_braced_json(text):
                 # Extrai o primeiro objeto JSON balanceado usando pilha de chaves, ignorando conteúdo dentro de aspas
