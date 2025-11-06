@@ -6,6 +6,7 @@ Requer: pip install slack-bolt requests python-dotenv flask
 
 import os
 import logging
+import re
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 import requests
@@ -102,38 +103,84 @@ Rules:
             content = result['choices'][0]['message']['content']
             logging.debug(f"AI content preview: {content[:200]}")
             
-            # Remoção resiliente de cercas markdown (``` e ```json)
-            raw = content.strip()
-            parsed = None
-            if raw.startswith('```'):
-                lines = raw.split('\n')
-                # Se primeira linha contém ``` ou ```json, procurar a última linha de ```
-                if lines:
+            def remove_code_fences(text):
+                t = text.strip()
+                if t.startswith('```'):
+                    lines = t.split('\n')
+                    # remove primeira linha ``` ou ```json
+                    # encontra última linha com ```
                     fence_end_idx = None
                     for i in range(len(lines) - 1, -1, -1):
                         if lines[i].strip().startswith('```'):
                             fence_end_idx = i
                             break
                     if fence_end_idx is not None and fence_end_idx > 0:
-                        maybe_json = '\n'.join(lines[1:fence_end_idx])
-                        try:
-                            parsed = json.loads(maybe_json)
-                        except json.JSONDecodeError:
-                            parsed = None
-            if parsed is None:
-                try:
-                    parsed = json.loads(raw)
-                except json.JSONDecodeError:
-                    # Fallback: tentar extrair substring entre primeira '{' e última '}'
-                    start = raw.find('{')
-                    end = raw.rfind('}')
-                    if start != -1 and end != -1 and end > start:
-                        try:
-                            parsed = json.loads(raw[start:end+1])
-                        except json.JSONDecodeError as e:
-                            raise e
+                        return '\n'.join(lines[1:fence_end_idx]).strip()
+                return t
+
+            def sanitize_control_chars(text):
+                # remove caracteres de controle inválidos JSON (mantém \n, \r, \t)
+                return re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", text)
+
+            def extract_braced_json(text):
+                # Extrai o primeiro objeto JSON balanceado usando pilha de chaves, ignorando conteúdo dentro de aspas
+                s = text
+                in_str = False
+                esc = False
+                depth = 0
+                start_idx = -1
+                for i, ch in enumerate(s):
+                    if in_str:
+                        if esc:
+                            esc = False
+                        elif ch == '\\':
+                            esc = True
+                        elif ch == '"':
+                            in_str = False
                     else:
-                        raise
+                        if ch == '"':
+                            in_str = True
+                        elif ch == '{':
+                            if depth == 0:
+                                start_idx = i
+                            depth += 1
+                        elif ch == '}':
+                            if depth > 0:
+                                depth -= 1
+                                if depth == 0 and start_idx != -1:
+                                    segment = s[start_idx:i+1]
+                                    return segment
+                return None
+
+            raw = remove_code_fences(content)
+            raw = sanitize_control_chars(raw)
+
+            parsed = None
+            # 1) tenta parse direto
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                # 2) tenta extrair objeto balanceado
+                segment = extract_braced_json(raw)
+                if segment is not None:
+                    try:
+                        parsed = json.loads(segment)
+                    except json.JSONDecodeError:
+                        parsed = None
+            # 3) fallback: entre primeira '{' e última '}'
+            if parsed is None:
+                start = raw.find('{')
+                end = raw.rfind('}')
+                if start != -1 and end != -1 and end > start:
+                    cleaned = raw[start:end+1]
+                    try:
+                        parsed = json.loads(cleaned)
+                    except json.JSONDecodeError:
+                        pass
+
+            if parsed is None:
+                raise json.JSONDecodeError("Failed to parse AI response after sanitation and extraction.", raw, 0)
+
             tasks_data = parsed
             
             return {
